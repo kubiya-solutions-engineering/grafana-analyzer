@@ -1,0 +1,130 @@
+{
+  "tools": [
+    {
+      "name": "analyze_grafana_panel",
+      "source": null,
+      "alias": null,
+      "description": "Generate render URLs for relevant Grafana dashboard panels, download images, analyze them using OpenAI's vision model, and send results to the current Slack thread",
+      "type": "docker",
+      "content": "\npip install slack_sdk argparse requests litellm==1.49.5 pillow==11.0.0 tempfile > /dev/null 2>&1\n\npython /tmp/grafana.py     --grafana_dashboard_url \"$grafana_dashboard_url\"     --alert_name \"$alert_name\"     --alert_severity \"$alert_severity\"     --alert_service_name \"$alert_service_name\"     --alert_reason \"$alert_reason\"     --alert_message \"$alert_message\"     --alert_requests_per_second \"$alert_requests_per_second\"     --alert_active_connections \"$alert_active_connections\"     --alert_container_logs \"$alert_container_logs\"\n",
+      "content_url": null,
+      "args": [
+        {
+          "name": "grafana_dashboard_url",
+          "type": "string",
+          "description": "URL of the Grafana dashboard",
+          "required": true,
+          "default": null,
+          "options": null,
+          "options_from": null
+        },
+        {
+          "name": "alert_name",
+          "type": "string",
+          "description": "Name of the alert",
+          "required": true,
+          "default": null,
+          "options": null,
+          "options_from": null
+        },
+        {
+          "name": "alert_severity",
+          "type": "string",
+          "description": "Severity of the alert",
+          "required": true,
+          "default": null,
+          "options": null,
+          "options_from": null
+        },
+        {
+          "name": "alert_service_name",
+          "type": "string",
+          "description": "Name of the affected service",
+          "required": true,
+          "default": null,
+          "options": null,
+          "options_from": null
+        },
+        {
+          "name": "alert_reason",
+          "type": "string",
+          "description": "Reason for the alert",
+          "required": true,
+          "default": null,
+          "options": null,
+          "options_from": null
+        },
+        {
+          "name": "alert_message",
+          "type": "string",
+          "description": "Alert message",
+          "required": true,
+          "default": null,
+          "options": null,
+          "options_from": null
+        },
+        {
+          "name": "alert_requests_per_second",
+          "type": "integer",
+          "description": "Number of requests per second",
+          "required": true,
+          "default": null,
+          "options": null,
+          "options_from": null
+        },
+        {
+          "name": "alert_active_connections",
+          "type": "integer",
+          "description": "Number of active connections",
+          "required": true,
+          "default": null,
+          "options": null,
+          "options_from": null
+        },
+        {
+          "name": "alert_container_logs",
+          "type": "string",
+          "description": "Relevant container logs",
+          "required": true,
+          "default": null,
+          "options": null,
+          "options_from": null
+        }
+      ],
+      "env": [
+        "SLACK_THREAD_TS",
+        "SLACK_CHANNEL_ID",
+        "VISION_LLM_BASE_URL"
+      ],
+      "secrets": [
+        "SLACK_API_TOKEN",
+        "GRAFANA_API_KEY",
+        "VISION_LLM_KEY"
+      ],
+      "dependencies": null,
+      "dependencies_url": null,
+      "openapi": null,
+      "with_files": [
+        {
+          "source": null,
+          "destination": "/tmp/grafana.py",
+          "content": "import os\nimport re\nimport requests\nimport argparse\nimport tempfile\nfrom urllib.parse import urlparse, parse_qs\nfrom slack_sdk import WebClient\nfrom slack_sdk.errors import SlackApiError\nimport json\nfrom litellm import completion\nimport base64\nfrom PIL import Image\nfrom typing import Dict, List, Tuple, Optional\nimport logging\n\n# Constants\nDEFAULT_ORG_ID = \"1\"\nIMAGE_WIDTH = 1000\nIMAGE_HEIGHT = 500\nTIME_RANGE = \"1h\"\n\n# Add at the top of the file\nlogging.basicConfig(\n    level=logging.INFO,\n    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'\n)\nlogger = logging.getLogger(__name__)\n\ndef generate_grafana_api_url(grafana_dashboard_url: str) -> Tuple[str, str]:\n    parsed_url = urlparse(grafana_dashboard_url)\n    path_parts = parsed_url.path.strip(\"/\").split(\"/\")\n\n    if len(path_parts) >= 3 and path_parts[0] == \"d\":\n        dashboard_uid = path_parts[1]\n    else:\n        raise ValueError(\"URL path does not have the expected format /d/{uid}/{slug}\")\n\n    query_params = parse_qs(parsed_url.query)\n    org_id = query_params.get(\"orgId\", [DEFAULT_ORG_ID])[0]\n\n    api_url = f\"{parsed_url.scheme}://{parsed_url.netloc}/api/dashboards/uid/{dashboard_uid}\"\n    return api_url, org_id\n\ndef get_dashboard_panels(api_url, api_key):\n    headers = {\"Authorization\": f\"Bearer {api_key}\"}\n    try:\n        response = requests.get(api_url, headers=headers)\n        response.raise_for_status()  # Raises an HTTPError for bad responses\n        dashboard_data = response.json()\n        panels = dashboard_data.get('dashboard', {}).get('panels', [])\n        if not panels:\n            raise ValueError(\"No panels found in dashboard\")\n        return [(panel.get('title'), panel.get('id')) for panel in panels if 'title' in panel and 'id' in panel]\n    except requests.exceptions.RequestException as e:\n        raise Exception(f\"Failed to fetch dashboard data: {str(e)}\")\n\ndef generate_grafana_render_url(grafana_dashboard_url, panel_id):\n    parsed_url = urlparse(grafana_dashboard_url)\n    path_parts = parsed_url.path.strip(\"/\").split(\"/\")\n\n    if len(path_parts) >= 3 and path_parts[0] == \"d\":\n        dashboard_uid = path_parts[1]\n        dashboard_slug = path_parts[2]\n    else:\n        raise ValueError(\"URL path does not have the expected format /d/{uid}/{slug}\")\n\n    query_params = parse_qs(parsed_url.query)\n    org_id = query_params.get(\"orgId\", [\"1\"])[0]\n\n    render_url = f\"{parsed_url.scheme}://{parsed_url.netloc}/render/d-solo/{dashboard_uid}/{dashboard_slug}?orgId={org_id}&from=now-1h&to=now&panelId={panel_id}&width=1000&height=500\"\n    return render_url, org_id\n\ndef download_panel_image(render_url: str, api_key: str, panel_title: str) -> Optional[bytes]:\n    with requests.get(render_url, headers={\"Authorization\": f\"Bearer {api_key}\"}, stream=True) as response:\n        try:\n            response.raise_for_status()\n            return response.content\n        except requests.exceptions.RequestException as e:\n            print(f\"Failed to download panel image {panel_title}: {str(e)}\")\n            return None\n\ndef send_slack_file_to_thread(token, channel_id, thread_ts, file_path, initial_comment):\n    client = WebClient(token=token)\n    try:\n        response = client.files_upload_v2(\n            channel=channel_id,\n            file=file_path,\n            initial_comment=initial_comment,\n            thread_ts=thread_ts\n        )\n        return response\n    except SlackApiError as e:\n        raise\n\ndef extract_slack_response_info(response):\n    return {\n        \"ok\": response.get(\"ok\"),\n        \"file_id\": response.get(\"file\", {}).get(\"id\"),\n        \"file_name\": response.get(\"file\", {}).get(\"name\"),\n        \"file_url\": response.get(\"file\", {}).get(\"url_private\"),\n        \"timestamp\": response.get(\"file\", {}).get(\"timestamp\")\n    }\n\ndef analyze_image_with_vision_model(\n    image_content: bytes,\n    panel_title: str,\n    alert_info: Dict[str, str]\n) -> str:\n    llm_key = os.environ[\"VISION_LLM_KEY\"]\n    llm_base_url = os.environ[\"VISION_LLM_BASE_URL\"]\n\n    base64_image = base64.b64encode(image_content).decode('utf-8')\n\n    prompt = f\"\"\"Analyze this Grafana panel image titled '{panel_title}' in the context of the following alert:\n\nAlert Name: {alert_info['name']}\nSeverity: {alert_info['severity']}\nService Name: {alert_info['service_name']}\nReason: {alert_info['reason']}\nMessage: {alert_info['message']}\nRequests per second: {alert_info['requests_per_second']}\nActive connections: {alert_info['active_connections']}\n\n1. Does this panel show any significant activity or anomalies that could be related to the alert?\n2. Are there any visible spikes, dips, or unusual patterns in the metrics shown?\n3. Does the data in this panel correlate with the information provided in the alert?\n\nRespond with 'Relevant' or 'Not Relevant' and provide a brief explanation of your decision.\"\"\"\n\n    try:\n        response = completion(\n            model=\"openai/gpt-4o\",\n            api_key=llm_key,\n            base_url=llm_base_url,\n            messages=[\n                {\n                    \"role\": \"user\",\n                    \"content\": [\n                        {\"type\": \"text\", \"text\": prompt},\n                        {\n                            \"type\": \"image_url\",\n                            \"image_url\": {\n                                \"url\": f\"data:image/png;base64,{base64_image}\"\n                            },\n                        },\n                    ],\n                }\n            ],\n        )\n        return response.choices[0].message.content\n    except Exception as e:\n        return \"Error: Unable to analyze the image\"\n\ndef find_related_panels(panels: List[Tuple[str, int]], alert_info: Dict, grafana_dashboard_url: str, grafana_api_key: str) -> List[Tuple]:\n    related_panels = []\n    for panel_title, panel_id in panels:\n        logger.info(f\"Analyzing panel: {panel_title}\")\n        render_url, _ = generate_grafana_render_url(grafana_dashboard_url, panel_id)\n        image_content = download_panel_image(render_url, grafana_api_key, panel_title)\n        \n        if image_content:\n            analysis_result = analyze_image_with_vision_model(image_content, panel_title, alert_info)\n            if analysis_result.lower().startswith('relevant'):\n                related_panels.append((panel_title, panel_id, image_content, analysis_result))\n        else:\n            logger.warning(f\"Failed to download image for panel: {panel_title}\")\n\n    return related_panels\n\ndef main():\n    required_env_vars = [\n        \"SLACK_THREAD_TS\",\n        \"SLACK_CHANNEL_ID\",\n        \"SLACK_API_TOKEN\",\n        \"GRAFANA_API_KEY\",\n        \"VISION_LLM_KEY\",\n        \"VISION_LLM_BASE_URL\"\n    ]\n    \n    missing_vars = [var for var in required_env_vars if not os.environ.get(var)]\n    if missing_vars:\n        raise ValueError(f\"Missing required environment variables: {', '.join(missing_vars)}\")\n    \n    parser = argparse.ArgumentParser(description=\"Process Grafana dashboard and alert data.\")\n    parser.add_argument(\"--grafana_dashboard_url\", required=True, help=\"URL of the Grafana dashboard\")\n    parser.add_argument(\"--alert_name\", required=True, help=\"Name of the alert\")\n    parser.add_argument(\"--alert_severity\", required=True, help=\"Severity of the alert\")\n    parser.add_argument(\"--alert_service_name\", required=True, help=\"Name of the affected service\")\n    parser.add_argument(\"--alert_reason\", required=True, help=\"Reason for the alert\")\n    parser.add_argument(\"--alert_message\", required=True, help=\"Alert message\")\n    parser.add_argument(\"--alert_requests_per_second\", type=int, required=True, help=\"Number of requests per second\")\n    parser.add_argument(\"--alert_active_connections\", type=int, required=True, help=\"Number of active connections\")\n    parser.add_argument(\"--alert_container_logs\", required=True, help=\"Relevant container logs\")\n    args = parser.parse_args()\n\n    grafana_dashboard_url = args.grafana_dashboard_url\n    thread_ts = os.environ.get(\"SLACK_THREAD_TS\")\n    channel_id = os.environ.get(\"SLACK_CHANNEL_ID\")\n    slack_token = os.environ.get(\"SLACK_API_TOKEN\")\n    grafana_api_key = os.environ.get(\"GRAFANA_API_KEY\")\n\n    alert_info = {\n        \"name\": args.alert_name,\n        \"severity\": args.alert_severity,\n        \"service_name\": args.alert_service_name,\n        \"reason\": args.alert_reason,\n        \"message\": args.alert_message,\n        \"requests_per_second\": args.alert_requests_per_second,\n        \"active_connections\": args.alert_active_connections,\n        \"container_logs\": args.alert_container_logs\n    }\n\n    api_url, org_id = generate_grafana_api_url(grafana_dashboard_url)\n    all_panels = get_dashboard_panels(api_url, grafana_api_key)\n\n    related_panels = find_related_panels(all_panels, alert_info, grafana_dashboard_url, grafana_api_key)\n\n    for panel_title, panel_id, image_content, analysis_result in related_panels:\n        render_url, _ = generate_grafana_render_url(grafana_dashboard_url, panel_id)\n\n        initial_comment = (f\"Grafana panel image: {panel_title}\\n\"\n                         f\"From dashboard: {grafana_dashboard_url}\\n\\n\"\n                         f\"Analysis:\\n{analysis_result}\")\n        \n        with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as temp_file:\n            temp_file.write(image_content)\n            temp_file_path = temp_file.name\n\n        slack_response = send_slack_file_to_thread(slack_token, channel_id, thread_ts, temp_file_path, initial_comment)\n\n        response_info = extract_slack_response_info(slack_response)\n\n        os.remove(temp_file_path)\n\nif __name__ == \"__main__\":\n    main()\n"
+        }
+      ],
+      "with_services": [],
+      "with_git_repo": null,
+      "with_volumes": [],
+      "entrypoint": [],
+      "icon_url": null,
+      "image": "python:3.12",
+      "long_running": false,
+      "on_start": null,
+      "on_complete": null,
+      "mermaid": "graph TD\n    %% Styles\n    classDef triggerClass fill:#3498db,color:#fff,stroke:#2980b9,stroke-width:2px,font-weight:bold\n    classDef paramClass fill:#2ecc71,color:#fff,stroke:#27ae60,stroke-width:2px\n    classDef execClass fill:#e74c3c,color:#fff,stroke:#c0392b,stroke-width:2px,font-weight:bold\n    classDef envClass fill:#f39c12,color:#fff,stroke:#f1c40f,stroke-width:2px\n\n    %% Main Components\n    Trigger(\"Trigger\"):::triggerClass\n    Params(\"Parameters\"):::paramClass\n    Exec(\"analyze_grafana_panel\"):::execClass\n    Env(\"Environment\"):::envClass\n\n    %% Flow\n    Trigger --> Params --> Exec\n    Env --> Exec\n\n    %% Trigger Options\n    User(\"User\")\n    API(\"API\")\n    Webhook(\"Webhook\")\n    Cron(\"Scheduled\")\n    User --> Trigger\n    API --> Trigger\n    Webhook --> Trigger\n    Cron --> Trigger\n\n    %% Parameters\n    subgraph Parameters[\"Parameters\"]\n        direction TB\n        Param0(\"grafana_dashboard_url (Required)<br/>URL of the Grafana dashboard<br/>Type: string\"):::paramClass\n        Param1(\"alert_name (Required)<br/>Name of the alert<br/>Type: string\"):::paramClass\n        Param2(\"alert_severity (Required)<br/>Severity of the alert<br/>Type: string\"):::paramClass\n        Param3(\"alert_service_name (Required)<br/>Name of the affected service<br/>Type: string\"):::paramClass\n        Param4(\"alert_reason (Required)<br/>Reason for the alert<br/>Type: string\"):::paramClass\n        Param5(\"alert_message (Required)<br/>Alert message<br/>Type: string\"):::paramClass\n        Param6(\"alert_requests_per_second (Required)<br/>Number of requests per second<br/>Type: integer\"):::paramClass\n        Param7(\"alert_active_connections (Required)<br/>Number of active connections<br/>Type: integer\"):::paramClass\n        Param8(\"alert_container_logs (Required)<br/>Relevant container logs<br/>Type: string\"):::paramClass\n    end\n    Parameters --- Params\n\n    %% Execution\n    subgraph Execution[\"Execution\"]\n        direction TB\n        Code(\"Script: <br/>pip install slack_sdk argparse requests litellm==...\")\n        Type(\"Type: Docker\")\n        Image(\"Docker Image: python:3.12\")\n    end\n    Execution --- Exec\n\n    %% Environment\n    subgraph Environment[\"Environment\"]\n        direction TB\n        EnvVars(\"Environment Variables:<br/>SLACK_THREAD_TS<br/>SLACK_CHANNEL_ID<br/>VISION_LLM_BASE_URL\"):::envClass\n        Secrets(\"Secrets:<br/>SLACK_API_TOKEN<br/>GRAFANA_API_KEY<br/>VISION_LLM_KEY\"):::envClass\n    end\n    Environment --- Env\n\n    %% Context Note\n    ContextNote(\"Parameter values can be<br/>fetched from context<br/>based on the trigger\")\n    ContextNote -.-> Params",
+      "workflow": false,
+      "metadata": {}
+    }
+  ],
+  "errors": [],
+  "python_bundle_version": "3.11.9"
+}
